@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Address Map + Neighborhood</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://cdn.jotfor.ms/s/umd/latest/for-custom-widgets.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; color: #2c3345; background: transparent;
+  }
+  #wrap { width: 100%; }
+
+  #searchRow { display: flex; gap: 6px; margin-bottom: 8px; }
+  #search {
+    flex: 1 1 auto; min-width: 0;
+    padding: 9px 11px; font-size: 14px; font-family: inherit; color: inherit;
+    border: 1px solid #c3cad9; border-radius: 4px; background: #fff;
+  }
+  #search:focus { outline: none; border-color: #6f76f1; box-shadow: 0 0 0 3px rgba(111,118,241,.15); }
+  #locBtn {
+    flex: 0 0 auto; padding: 9px 12px; font-size: 14px; font-family: inherit;
+    border: 1px solid #c3cad9; border-radius: 4px; background: #fff; cursor: pointer; line-height: 1;
+  }
+  #locBtn:hover { background: #f3f5fa; }
+  #locBtn:disabled { opacity: .5; cursor: default; }
+
+  #map { width: 100%; height: 320px; border: 1px solid #c3cad9; border-radius: 4px; background: #e8eaf0; }
+  .leaflet-container { font: inherit; }
+
+  #out { margin-top: 8px; line-height: 1.5; }
+  #status { color: #6b7386; font-size: 12.5px; min-height: 17px; }
+  #status.err { color: #d43f3f; }
+  .row { display: flex; gap: 6px; padding: 1px 0; }
+  .lbl { flex: 0 0 96px; color: #6b7386; font-size: 12.5px; padding-top: 1px; }
+  .val { flex: 1 1 auto; word-break: break-word; }
+  .hood { font-weight: 600; }
+  .hood.none { font-weight: 400; color: #9aa1b2; font-style: italic; }
+  #out[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="searchRow">
+    <input id="search" type="text" autocomplete="off" placeholder="Start typing an address…">
+    <button id="locBtn" type="button" title="Use my current location">◎</button>
+  </div>
+  <div id="map"></div>
+  <div id="status"></div>
+  <div id="out" hidden>
+    <div class="row"><div class="lbl">Neighborhood</div><div class="val hood" id="vHood">—</div></div>
+    <div class="row"><div class="lbl">Address</div><div class="val" id="vAddr">—</div></div>
+    <div class="row"><div class="lbl">Coordinates</div><div class="val" id="vCoord">—</div></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ------------------------------------------------------------------ *
+   * Config defaults. Every one of these is overridable from the Jotform
+   * widget settings panel using the exact name in the SETTINGS map below.
+   * ------------------------------------------------------------------ */
+  var CFG = {
+    addressFieldId : "",            // e.g. "4" -> listen to input_4 instead of / as well as the box
+    showSearchBox  : true,
+    placeholder    : "Start typing an address…",
+    mapHeight      : 320,
+    startLat       : 39.8283,       // geographic center of the US
+    startLng       : -98.5795,
+    startZoom      : 3,
+    resultZoom     : 16,
+    provider       : "osm",         // "osm" | "google"
+    googleKey      : "",
+    countryCodes   : "",            // e.g. "us" or "us,ca" — biases/limits Nominatim results
+    debounceMs     : 900,           // Nominatim asks for <= 1 req/sec. Do not lower for OSM.
+    showCurrentLoc : true,
+    draggablePin   : true,
+    requireValue   : false
+  };
+
+  // Jotform setting name -> CFG key + coercion
+  var SETTINGS = {
+    "Address Field ID"      : ["addressFieldId", str],
+    "Show Search Box"       : ["showSearchBox",  bool],
+    "Search Placeholder"    : ["placeholder",    str],
+    "Map Height"            : ["mapHeight",      num],
+    "Start Latitude"        : ["startLat",       num],
+    "Start Longitude"       : ["startLng",       num],
+    "Start Zoom"            : ["startZoom",      num],
+    "Result Zoom"           : ["resultZoom",     num],
+    "Map Provider"          : ["provider",       provider],
+    "Google API Key"        : ["googleKey",      str],
+    "Country Codes"         : ["countryCodes",   str],
+    "Show Current Location" : ["showCurrentLoc", bool],
+    "Draggable Pin"         : ["draggablePin",   bool],
+    "Required"              : ["requireValue",   bool]
+  };
+
+  function str(v)  { return v == null ? "" : String(v).trim(); }
+  function num(v)  { var n = parseFloat(v); return isFinite(n) ? n : null; }
+  function bool(v) { return /^(yes|true|1|on)$/i.test(str(v)); }
+  function provider(v) { return /google/i.test(str(v)) ? "google" : "osm"; }
+
+  /* ------------------------------------------------------------------ *
+   * State
+   * ------------------------------------------------------------------ */
+  var map, marker, tiles;
+
+  // Inline SVG pin. Leaflet's default marker pulls two PNGs off the CDN and
+  // shows a broken image if they 404 (a common complaint) — this has no
+  // external image dependency at all.
+  var PIN_SVG = 'data:image/svg+xml;base64,' + btoa(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="38" viewBox="0 0 26 38">' +
+    '<path d="M13 0C5.82 0 0 5.82 0 13c0 9.75 13 25 13 25s13-15.25 13-25c0-7.18-5.82-13-13-13z" ' +
+    'fill="#e8453c" stroke="#fff" stroke-width="2"/>' +
+    '<circle cx="13" cy="13" r="4.5" fill="#fff"/></svg>');
+
+  var PIN_ICON = null; // built after Leaflet loads
+
+  var result = null;          // last resolved location object
+  var reqSeq = 0;             // guards against out-of-order async responses
+  var lastQuery = "";
+  var debounceTimer = null;
+  var inJotform = (typeof JFCustomWidget !== "undefined");
+
+  var $search = document.getElementById("search");
+  var $searchRow = document.getElementById("searchRow");
+  var $locBtn = document.getElementById("locBtn");
+  var $status = document.getElementById("status");
+  var $out    = document.getElementById("out");
+  var $vHood  = document.getElementById("vHood");
+  var $vAddr  = document.getElementById("vAddr");
+  var $vCoord = document.getElementById("vCoord");
+
+  /* ------------------------------------------------------------------ *
+   * Neighborhood extraction.
+   *
+   * Coverage is genuinely inconsistent across both providers, so we walk a
+   * fallback chain from most specific to least and report which key we got
+   * it from. A blank neighborhood is a normal outcome, not an error.
+   * ------------------------------------------------------------------ */
+  var OSM_HOOD_KEYS = [
+    "neighbourhood", "neighborhood", "quarter", "residential",
+    "suburb", "borough", "city_district", "district", "subdivision"
+  ];
+
+  var GOOGLE_HOOD_TYPES = [
+    "neighborhood", "sublocality_level_1", "sublocality",
+    "sublocality_level_2", "political"
+  ];
+
+  function hoodFromOsm(addr) {
+    if (!addr) return { name: "", source: "" };
+    for (var i = 0; i < OSM_HOOD_KEYS.length; i++) {
+      var k = OSM_HOOD_KEYS[i];
+      if (addr[k]) return { name: String(addr[k]), source: k };
+    }
+    return { name: "", source: "" };
+  }
+
+  function hoodFromGoogle(components) {
+    if (!components) return { name: "", source: "" };
+    for (var t = 0; t < GOOGLE_HOOD_TYPES.length; t++) {
+      var want = GOOGLE_HOOD_TYPES[t];
+      for (var i = 0; i < components.length; i++) {
+        var c = components[i];
+        if (c.types && c.types.indexOf(want) !== -1) {
+          // "political" alone is too broad — only accept it alongside a sublocality hint
+          if (want === "political" && c.types.length === 1) continue;
+          return { name: c.long_name, source: want };
+        }
+      }
+    }
+    return { name: "", source: "" };
+  }
+
+  function googleComp(components, type) {
+    if (!components) return "";
+    for (var i = 0; i < components.length; i++) {
+      if (components[i].types && components[i].types.indexOf(type) !== -1) {
+        return components[i].long_name;
+      }
+    }
+    return "";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Geocoding
+   * ------------------------------------------------------------------ */
+  function getJSON(url) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", url, true);
+      xhr.timeout = 15000;
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch (e) { reject(new Error("Bad JSON from geocoder")); }
+        } else {
+          reject(new Error("Geocoder returned " + xhr.status));
+        }
+      };
+      xhr.ontimeout = function () { reject(new Error("Geocoder timed out")); };
+      xhr.onerror   = function () { reject(new Error("Could not reach the geocoder")); };
+      xhr.send();
+    });
+  }
+
+  function normalizeOsm(item) {
+    var a = item.address || {};
+    var h = hoodFromOsm(a);
+    return {
+      lat: parseFloat(item.lat),
+      lng: parseFloat(item.lon),
+      formatted: item.display_name || "",
+      neighborhood: h.name,
+      neighborhoodSource: h.source,
+      street: [a.house_number, a.road].filter(Boolean).join(" "),
+      city: a.city || a.town || a.village || a.hamlet || a.municipality || "",
+      county: a.county || "",
+      state: a.state || a.province || "",
+      postal: a.postcode || "",
+      country: a.country || "",
+      countryCode: (a.country_code || "").toUpperCase(),
+      provider: "osm"
+    };
+  }
+
+  function normalizeGoogle(item) {
+    var c = item.address_components || [];
+    var h = hoodFromGoogle(c);
+    var loc = (item.geometry && item.geometry.location) || {};
+    return {
+      lat: loc.lat, lng: loc.lng,
+      formatted: item.formatted_address || "",
+      neighborhood: h.name,
+      neighborhoodSource: h.source,
+      street: [googleComp(c, "street_number"), googleComp(c, "route")].filter(Boolean).join(" "),
+      city: googleComp(c, "locality") || googleComp(c, "postal_town") ||
+            googleComp(c, "administrative_area_level_3") || "",
+      county: googleComp(c, "administrative_area_level_2") || "",
+      state: googleComp(c, "administrative_area_level_1") || "",
+      postal: googleComp(c, "postal_code") || "",
+      country: googleComp(c, "country") || "",
+      countryCode: (function () {
+        for (var i = 0; i < c.length; i++) {
+          if (c[i].types && c[i].types.indexOf("country") !== -1) return c[i].short_name;
+        }
+        return "";
+      })(),
+      provider: "google"
+    };
+  }
+
+  // Forward geocode: address text -> location
+  function geocode(query) {
+    if (CFG.provider === "google" && CFG.googleKey) {
+      var gurl = "https://maps.googleapis.com/maps/api/geocode/json?address=" +
+                 encodeURIComponent(query) + "&key=" + encodeURIComponent(CFG.googleKey);
+      return getJSON(gurl).then(function (d) {
+        if (d.status === "ZERO_RESULTS") return null;
+        if (d.status !== "OK") throw new Error(d.error_message || ("Google: " + d.status));
+        return normalizeGoogle(d.results[0]);
+      });
+    }
+    var url = "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&q=" +
+              encodeURIComponent(query);
+    if (CFG.countryCodes) url += "&countrycodes=" + encodeURIComponent(CFG.countryCodes);
+    return getJSON(url).then(function (d) {
+      return (d && d.length) ? normalizeOsm(d[0]) : null;
+    });
+  }
+
+  // Reverse geocode: lat/lng -> location (used after a pin drag)
+  function reverseGeocode(lat, lng) {
+    if (CFG.provider === "google" && CFG.googleKey) {
+      var gurl = "https://maps.googleapis.com/maps/api/geocode/json?latlng=" +
+                 lat + "," + lng + "&key=" + encodeURIComponent(CFG.googleKey);
+      return getJSON(gurl).then(function (d) {
+        if (d.status !== "OK" || !d.results.length) return null;
+        return normalizeGoogle(d.results[0]);
+      });
+    }
+    var url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&lat=" +
+              lat + "&lon=" + lng;
+    return getJSON(url).then(function (d) {
+      return (d && !d.error) ? normalizeOsm(d) : null;
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Map
+   * ------------------------------------------------------------------ */
+  function initMap() {
+    document.getElementById("map").style.height = CFG.mapHeight + "px";
+
+    PIN_ICON = L.icon({
+      iconUrl: PIN_SVG, iconSize: [26, 38], iconAnchor: [13, 38], popupAnchor: [0, -34]
+    });
+
+    map = L.map("map", { scrollWheelZoom: false, zoomControl: true })
+           .setView([CFG.startLat, CFG.startLng], CFG.startZoom);
+
+    tiles = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    // Scroll-wheel zoom only after a click, so the widget doesn't hijack page scroll
+    map.on("click", function () { map.scrollWheelZoom.enable(); });
+    map.on("mouseout", function () { map.scrollWheelZoom.disable(); });
+
+    setTimeout(function () { map.invalidateSize(); }, 200);
+  }
+
+  function placeMarker(lat, lng) {
+    if (!marker) {
+      marker = L.marker([lat, lng], { draggable: CFG.draggablePin, icon: PIN_ICON }).addTo(map);
+      if (CFG.draggablePin) {
+        marker.on("dragend", function () {
+          var p = marker.getLatLng();
+          setStatus("Looking up dropped pin…");
+          var seq = ++reqSeq;
+          reverseGeocode(p.lat, p.lng).then(function (r) {
+            if (seq !== reqSeq) return;
+            if (r) { applyResult(r, false); }
+            else   { setStatus("No address found at that point.", true); }
+          }).catch(function (e) {
+            if (seq !== reqSeq) return;
+            setStatus(e.message, true);
+          });
+        });
+      }
+    } else {
+      marker.setLatLng([lat, lng]);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Rendering + reporting back to Jotform
+   * ------------------------------------------------------------------ */
+  function setStatus(msg, isErr) {
+    $status.textContent = msg || "";
+    $status.className = isErr ? "err" : "";
+  }
+
+  function applyResult(r, recenter) {
+    result = r;
+
+    if (isFinite(r.lat) && isFinite(r.lng)) {
+      placeMarker(r.lat, r.lng);
+      if (recenter !== false) map.setView([r.lat, r.lng], CFG.resultZoom);
+    }
+
+    $out.hidden = false;
+    if (r.neighborhood) {
+      $vHood.textContent = r.neighborhood;
+      $vHood.className = "val hood";
+    } else {
+      $vHood.textContent = "not available for this address";
+      $vHood.className = "val hood none";
+    }
+    $vAddr.textContent  = r.formatted || "—";
+    $vCoord.textContent = (isFinite(r.lat) ? r.lat.toFixed(6) : "?") + ", " +
+                          (isFinite(r.lng) ? r.lng.toFixed(6) : "?");
+
+    setStatus("");
+    send();
+  }
+
+  function clearResult() {
+    result = null;
+    $out.hidden = true;
+    if (marker) { map.removeLayer(marker); marker = null; }
+    send();
+  }
+
+  // The value Jotform stores for this field.
+  function payload() {
+    if (!result) return "";
+    return JSON.stringify({
+      neighborhood: result.neighborhood,
+      neighborhoodSource: result.neighborhoodSource,
+      address: result.formatted,
+      street: result.street,
+      city: result.city,
+      county: result.county,
+      state: result.state,
+      postal: result.postal,
+      country: result.country,
+      countryCode: result.countryCode,
+      lat: result.lat,
+      lng: result.lng,
+      provider: result.provider
+    });
+  }
+
+  function send() {
+    if (!inJotform) return;
+    try { JFCustomWidget.sendData({ value: payload() }); } catch (e) {}
+  }
+
+  function resize() {
+    if (!inJotform) return;
+    var h = document.getElementById("wrap").offsetHeight + 12;
+    try { JFCustomWidget.requestFrameResize({ height: h }); } catch (e) {}
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Query flow
+   * ------------------------------------------------------------------ */
+  function runQuery(q, immediate) {
+    q = str(q);
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+
+    if (q.length < 4) { lastQuery = q; setStatus(""); return; }
+    if (q === lastQuery) return;
+    lastQuery = q;
+
+    var fire = function () {
+      var seq = ++reqSeq;
+      setStatus("Searching…");
+      geocode(q).then(function (r) {
+        if (seq !== reqSeq) return;
+        if (r) { applyResult(r, true); resize(); }
+        else   { setStatus("No match found for that address.", true); clearResult(); }
+      }).catch(function (e) {
+        if (seq !== reqSeq) return;
+        setStatus(e.message, true);
+      });
+    };
+
+    if (immediate) fire();
+    else debounceTimer = setTimeout(fire, CFG.debounceMs);
+  }
+
+  function useCurrentLocation() {
+    if (!navigator.geolocation) { setStatus("This browser can't share location.", true); return; }
+    $locBtn.disabled = true;
+    setStatus("Getting your location…");
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      var seq = ++reqSeq;
+      reverseGeocode(pos.coords.latitude, pos.coords.longitude).then(function (r) {
+        $locBtn.disabled = false;
+        if (seq !== reqSeq) return;
+        if (r) {
+          applyResult(r, true);
+          if ($search) { $search.value = r.formatted; lastQuery = r.formatted; }
+          resize();
+        } else {
+          setStatus("Couldn't resolve your location to an address.", true);
+        }
+      }).catch(function (e) { $locBtn.disabled = false; setStatus(e.message, true); });
+    }, function (err) {
+      $locBtn.disabled = false;
+      setStatus(err.code === 1 ? "Location permission denied." : "Couldn't get your location.", true);
+    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Wire up
+   * ------------------------------------------------------------------ */
+  function bindUI() {
+    $search.placeholder = CFG.placeholder;
+    $searchRow.style.display = CFG.showSearchBox ? "flex" : "none";
+    $locBtn.style.display = CFG.showCurrentLoc ? "block" : "none";
+
+    $search.addEventListener("input", function () { runQuery($search.value, false); });
+    $search.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); lastQuery = ""; runQuery($search.value, true); }
+    });
+    $search.addEventListener("blur", function () { runQuery($search.value, true); });
+    $locBtn.addEventListener("click", useCurrentLocation);
+  }
+
+  function loadSettings() {
+    if (!inJotform) return;
+    Object.keys(SETTINGS).forEach(function (name) {
+      var raw;
+      try { raw = JFCustomWidget.getWidgetSetting(name); } catch (e) { return; }
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      var key = SETTINGS[name][0], coerce = SETTINGS[name][1];
+      var v = coerce(raw);
+      if (v !== null) CFG[key] = v;
+    });
+  }
+
+  function start() {
+    loadSettings();
+    initMap();
+    bindUI();
+    resize();
+
+    // Mode 2: mirror a native Jotform address/textbox field.
+    if (inJotform && CFG.addressFieldId) {
+      var fid = "input_" + CFG.addressFieldId.replace(/^input_/, "");
+      try {
+        JFCustomWidget.listenFromField(fid, "change", function (value) {
+          var v = (value && value.value !== undefined) ? value.value : value;
+          if (v && typeof v === "object") v = Object.keys(v).map(function (k) { return v[k]; })
+                                                            .filter(Boolean).join(", ");
+          if ($search && CFG.showSearchBox) $search.value = str(v);
+          runQuery(v, false);
+        });
+      } catch (e) {
+        setStatus("Couldn't attach to field " + fid + ".", true);
+      }
+      // Also pull whatever is already in the field on load
+      try {
+        JFCustomWidget.getFieldsValueById([CFG.addressFieldId.replace(/^input_/, "")], function (data) {
+          var v = data && (Array.isArray(data) ? data[0] : data[Object.keys(data)[0]]);
+          if (v && typeof v === "object") v = v.value !== undefined ? v.value : Object.keys(v)
+                                              .map(function (k) { return v[k]; }).filter(Boolean).join(", ");
+          if (v) { if ($search && CFG.showSearchBox) $search.value = str(v); runQuery(v, true); }
+        });
+      } catch (e) {}
+    }
+  }
+
+  if (inJotform) {
+    JFCustomWidget.subscribe("ready", function (data) {
+      // Restore a previously saved value (edit mode / prefill)
+      try {
+        var prev = data && data.value;
+        if (prev) {
+          var r = JSON.parse(prev);
+          if (r && isFinite(r.lat)) {
+            setTimeout(function () {
+              applyResult({
+                lat: r.lat, lng: r.lng, formatted: r.address || "",
+                neighborhood: r.neighborhood || "", neighborhoodSource: r.neighborhoodSource || "",
+                street: r.street || "", city: r.city || "", county: r.county || "",
+                state: r.state || "", postal: r.postal || "", country: r.country || "",
+                countryCode: r.countryCode || "", provider: r.provider || "osm"
+              }, true);
+              if ($search) { $search.value = r.address || ""; lastQuery = r.address || ""; }
+              resize();
+            }, 400);
+          }
+        }
+      } catch (e) {}
+      start();
+    });
+
+    JFCustomWidget.subscribe("submit", function () {
+      var value = payload();
+      JFCustomWidget.sendSubmit({
+        valid: CFG.requireValue ? !!value : true,
+        value: value
+      });
+    });
+  } else {
+    // Standalone / local testing
+    window.addEventListener("DOMContentLoaded", start);
+  }
+
+  // Expose for automated testing
+  window.__widget = {
+    geocode: geocode,
+    reverseGeocode: reverseGeocode,
+    hoodFromOsm: hoodFromOsm,
+    hoodFromGoogle: hoodFromGoogle,
+    runQuery: runQuery,
+    getResult: function () { return result; },
+    getPayload: payload,
+    cfg: CFG
+  };
+})();
+</script>
+</body>
+</html>
