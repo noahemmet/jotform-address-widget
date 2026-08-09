@@ -20,7 +20,19 @@
   }
   #wrap { width: 100%; }
 
-  #searchRow { display: flex; gap: 6px; margin-bottom: 8px; }
+  #searchRow { display: flex; gap: 6px; margin-bottom: 8px; position: relative; }
+
+  #ac {
+    position: absolute; top: 100%; left: 0; right: 52px; z-index: 1000;
+    margin-top: 2px; background: #fff; border: 1px solid #c3cad9; border-radius: 4px;
+    box-shadow: 0 4px 14px rgba(20,26,44,.12); max-height: 230px; overflow-y: auto;
+  }
+  #ac[hidden] { display: none; }
+  .ac-item { padding: 8px 11px; cursor: pointer; font-size: 13.5px; line-height: 1.35; border-bottom: 1px solid #eef0f5; }
+  .ac-item:last-child { border-bottom: 0; }
+  .ac-item:hover, .ac-item.on { background: #eef0fe; }
+  .ac-main { font-weight: 600; }
+  .ac-sub { color: #6b7386; font-size: 12.5px; }
   #search {
     flex: 1 1 auto; min-width: 0;
     padding: 9px 11px; font-size: 14px; font-family: inherit; color: inherit;
@@ -53,6 +65,7 @@
   <div id="searchRow">
     <input id="search" type="text" autocomplete="off" placeholder="Start typing an address…">
     <button id="locBtn" type="button" title="Use my current location">◎</button>
+    <div id="ac" hidden></div>
   </div>
   <div id="map"></div>
   <div id="status"></div>
@@ -86,7 +99,8 @@
     debounceMs     : 900,           // Nominatim asks for <= 1 req/sec. Do not lower for OSM.
     showCurrentLoc : true,
     draggablePin   : true,
-    requireValue   : false
+    requireValue   : false,
+    outputFormat   : "lines"        // "lines" | "json"
   };
 
   // Jotform setting name -> CFG key + coercion
@@ -104,13 +118,27 @@
     "Country Codes"         : ["countryCodes",   str],
     "Show Current Location" : ["showCurrentLoc", bool],
     "Draggable Pin"         : ["draggablePin",   bool],
-    "Required"              : ["requireValue",   bool]
+    "Required"              : ["requireValue",   bool],
+    "Output Format"         : ["outputFormat",   outFmt]
   };
 
   function str(v)  { return v == null ? "" : String(v).trim(); }
   function num(v)  { var n = parseFloat(v); return isFinite(n) ? n : null; }
   function bool(v) { return /^(yes|true|1|on)$/i.test(str(v)); }
   function provider(v) { return /google/i.test(str(v)) ? "google" : "osm"; }
+  function outFmt(v) {
+    var s = str(v).toLowerCase();
+    if (s.indexOf("json") === 0) return "json";
+    if (s.indexOf("neigh") === 0) return "neighborhood";
+    return "lines";
+  }
+
+  // "4, 5,7" -> ["4","5","7"]
+  function idList(v) {
+    return str(v).split(",")
+      .map(function (s) { return s.trim().replace(/^input_/, ""); })
+      .filter(Boolean);
+  }
 
   /* ------------------------------------------------------------------ *
    * State
@@ -132,11 +160,20 @@
   var reqSeq = 0;             // guards against out-of-order async responses
   var lastQuery = "";
   var debounceTimer = null;
-  var inJotform = (typeof JFCustomWidget !== "undefined");
+  var started = false;
+  var acItems = [];       // current autocomplete suggestions
+  var acIndex = -1;       // highlighted suggestion
+  var acSeq = 0;
+
+  // The Jotform script loads on ANY page, so its mere presence does not mean we
+  // are inside a form. We are only really embedded if we are also in an iframe.
+  // Even then the handshake can fail, so start() has a timeout fallback below.
+  var inJotform = (typeof JFCustomWidget !== "undefined") && (window.self !== window.top);
 
   var $search = document.getElementById("search");
   var $searchRow = document.getElementById("searchRow");
   var $locBtn = document.getElementById("locBtn");
+  var $ac     = document.getElementById("ac");
   var $status = document.getElementById("status");
   var $out    = document.getElementById("out");
   var $vHood  = document.getElementById("vHood");
@@ -282,6 +319,74 @@
     });
   }
 
+  // Autocomplete: address text -> up to 5 candidate locations
+  function suggest(query) {
+    if (CFG.provider === "google" && CFG.googleKey) {
+      var gurl = "https://maps.googleapis.com/maps/api/geocode/json?address=" +
+                 encodeURIComponent(query) + "&key=" + encodeURIComponent(CFG.googleKey);
+      return getJSON(gurl).then(function (d) {
+        if (d.status !== "OK") return [];
+        return d.results.slice(0, 5).map(normalizeGoogle);
+      });
+    }
+    var url = "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=" +
+              encodeURIComponent(query);
+    if (CFG.countryCodes) url += "&countrycodes=" + encodeURIComponent(CFG.countryCodes);
+    return getJSON(url).then(function (d) {
+      return (d || []).map(normalizeOsm);
+    });
+  }
+
+  function renderAc(items) {
+    acItems = items || [];
+    acIndex = -1;
+    if (!acItems.length) { $ac.hidden = true; $ac.innerHTML = ""; return; }
+
+    $ac.innerHTML = "";
+    acItems.forEach(function (r, i) {
+      var parts = (r.formatted || "").split(",");
+      var main = parts.slice(0, 2).join(",").trim();
+      var sub  = parts.slice(2).join(",").trim();
+
+      var el = document.createElement("div");
+      el.className = "ac-item";
+      el.setAttribute("data-i", String(i));
+
+      var m = document.createElement("div");
+      m.className = "ac-main";
+      m.textContent = main + (r.neighborhood ? "  ·  " + r.neighborhood : "");
+      var s = document.createElement("div");
+      s.className = "ac-sub";
+      s.textContent = sub;
+
+      el.appendChild(m);
+      if (sub) el.appendChild(s);
+      el.addEventListener("mousedown", function (ev) { ev.preventDefault(); chooseAc(i); });
+      $ac.appendChild(el);
+    });
+    $ac.hidden = false;
+  }
+
+  function highlightAc(n) {
+    var els = $ac.querySelectorAll(".ac-item");
+    if (!els.length) return;
+    acIndex = (n + els.length) % els.length;
+    for (var i = 0; i < els.length; i++) els[i].className = "ac-item" + (i === acIndex ? " on" : "");
+    els[acIndex].scrollIntoView({ block: "nearest" });
+  }
+
+  function chooseAc(i) {
+    var r = acItems[i];
+    if (!r) return;
+    closeAc();
+    $search.value = r.formatted;
+    lastQuery = r.formatted;
+    applyResult(r, true);
+    resize();
+  }
+
+  function closeAc() { $ac.hidden = true; $ac.innerHTML = ""; acItems = []; acIndex = -1; }
+
   // Reverse geocode: lat/lng -> location (used after a pin drag)
   function reverseGeocode(lat, lng) {
     if (CFG.provider === "google" && CFG.googleKey) {
@@ -387,8 +492,42 @@
   }
 
   // The value Jotform stores for this field.
+  //
+  // "lines" is the default: legible in Jotform's submission table and in
+  // notification emails, and still trivially parseable downstream by splitting
+  // each line on the first ": ".
   function payload() {
     if (!result) return "";
+    if (CFG.outputFormat === "json") return payloadJson();
+    // Pair with Jotform's own Address Search & Preview widget, which fills the
+    // standard components into real fields — this contributes only the piece
+    // Jotform can't produce, as a single clean value.
+    if (CFG.outputFormat === "neighborhood") return result.neighborhood || "";
+    return payloadLines();
+  }
+
+  function payloadLines() {
+    var rows = [
+      ["Neighborhood", result.neighborhood],
+      ["Street",       result.street],
+      ["City",         result.city],
+      ["County",       result.county],
+      ["State",        result.state],
+      ["Postal",       result.postal],
+      ["Country",      result.country],
+      ["Country Code", result.countryCode],
+      ["Latitude",     isFinite(result.lat) ? result.lat.toFixed(6) : ""],
+      ["Longitude",    isFinite(result.lng) ? result.lng.toFixed(6) : ""],
+      ["Full Address", result.formatted]
+    ];
+    return rows
+      .filter(function (r) { return str(r[1]) !== ""; })
+      // Strip any ": " or newline out of values so the format stays unambiguous
+      .map(function (r) { return r[0] + ": " + String(r[1]).replace(/[\r\n]+/g, " ").replace(/:\s/g, " - "); })
+      .join("\n");
+  }
+
+  function payloadJson() {
     return JSON.stringify({
       neighborhood: result.neighborhood,
       neighborhoodSource: result.neighborhoodSource,
@@ -406,6 +545,52 @@
     });
   }
 
+  // Read back a value this widget previously stored, in any output format.
+  // Returns a result-shaped object, or null if there is nothing usable.
+  function parseStored(prev) {
+    prev = str(prev);
+    if (!prev) return null;
+
+    var base = {
+      lat: NaN, lng: NaN, formatted: "", neighborhood: "", neighborhoodSource: "",
+      street: "", city: "", county: "", state: "", postal: "",
+      country: "", countryCode: "", provider: "osm"
+    };
+
+    if (prev.charAt(0) === "{") {
+      var j = JSON.parse(prev);
+      return {
+        lat: j.lat, lng: j.lng, formatted: j.address || "",
+        neighborhood: j.neighborhood || "", neighborhoodSource: j.neighborhoodSource || "",
+        street: j.street || "", city: j.city || "", county: j.county || "",
+        state: j.state || "", postal: j.postal || "", country: j.country || "",
+        countryCode: j.countryCode || "", provider: j.provider || "osm"
+      };
+    }
+
+    if (prev.indexOf("\n") === -1 && prev.indexOf(": ") === -1) {
+      // neighborhood-only mode: nothing to map from, but keep the label
+      base.neighborhood = prev;
+      return base;
+    }
+
+    var KEYS = {
+      "neighborhood": "neighborhood", "street": "street", "city": "city",
+      "county": "county", "state": "state", "postal": "postal",
+      "country": "country", "country code": "countryCode",
+      "latitude": "lat", "longitude": "lng", "full address": "formatted"
+    };
+    prev.split("\n").forEach(function (line) {
+      var i = line.indexOf(": ");
+      if (i < 1) return;
+      var k = KEYS[line.slice(0, i).trim().toLowerCase()];
+      if (!k) return;
+      var v = line.slice(i + 2).trim();
+      base[k] = (k === "lat" || k === "lng") ? parseFloat(v) : v;
+    });
+    return base;
+  }
+
   function send() {
     if (!inJotform) return;
     try { JFCustomWidget.sendData({ value: payload() }); } catch (e) {}
@@ -420,28 +605,42 @@
   /* ------------------------------------------------------------------ *
    * Query flow
    * ------------------------------------------------------------------ */
-  function runQuery(q, immediate) {
+  // mode: "suggest" -> show the dropdown and wait for a pick (user is typing here)
+  //       "apply"   -> take the top hit and move the map (Enter, or an external field)
+  function runQuery(q, mode) {
     q = str(q);
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
 
-    if (q.length < 4) { lastQuery = q; setStatus(""); return; }
-    if (q === lastQuery) return;
+    if (q.length < 4) { lastQuery = q; setStatus(""); closeAc(); return; }
+    if (mode === "suggest" && q === lastQuery) return;
     lastQuery = q;
 
     var fire = function () {
       var seq = ++reqSeq;
       setStatus("Searching…");
-      geocode(q).then(function (r) {
+      suggest(q).then(function (list) {
         if (seq !== reqSeq) return;
-        if (r) { applyResult(r, true); resize(); }
-        else   { setStatus("No match found for that address.", true); clearResult(); }
+        if (!list.length) {
+          setStatus("No match found for that address.", true);
+          closeAc();
+          return;
+        }
+        setStatus("");
+        if (mode === "apply") {
+          closeAc();
+          applyResult(list[0], true);
+          resize();
+        } else {
+          renderAc(list);
+        }
       }).catch(function (e) {
         if (seq !== reqSeq) return;
         setStatus(e.message, true);
+        closeAc();
       });
     };
 
-    if (immediate) fire();
+    if (mode === "apply") fire();
     else debounceTimer = setTimeout(fire, CFG.debounceMs);
   }
 
@@ -476,11 +675,21 @@
     $searchRow.style.display = CFG.showSearchBox ? "flex" : "none";
     $locBtn.style.display = CFG.showCurrentLoc ? "block" : "none";
 
-    $search.addEventListener("input", function () { runQuery($search.value, false); });
+    $search.addEventListener("input", function () { runQuery($search.value, "suggest"); });
+
     $search.addEventListener("keydown", function (e) {
-      if (e.key === "Enter") { e.preventDefault(); lastQuery = ""; runQuery($search.value, true); }
+      var open = !$ac.hidden && acItems.length;
+      if (e.key === "ArrowDown" && open) { e.preventDefault(); highlightAc(acIndex + 1); return; }
+      if (e.key === "ArrowUp"   && open) { e.preventDefault(); highlightAc(acIndex - 1); return; }
+      if (e.key === "Escape") { closeAc(); return; }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (open && acIndex >= 0) { chooseAc(acIndex); }
+        else { lastQuery = ""; runQuery($search.value, "apply"); }
+      }
     });
-    $search.addEventListener("blur", function () { runQuery($search.value, true); });
+
+    $search.addEventListener("blur", function () { setTimeout(closeAc, 150); });
     $locBtn.addEventListener("click", useCurrentLocation);
   }
 
@@ -497,77 +706,117 @@
   }
 
   function start() {
+    if (started) return;   // "ready" may fire after the timeout fallback already ran
+    started = true;
+
     loadSettings();
     initMap();
     bindUI();
     resize();
 
-    // Mode 2: mirror a native Jotform address/textbox field.
-    if (inJotform && CFG.addressFieldId) {
-      var fid = "input_" + CFG.addressFieldId.replace(/^input_/, "");
+    // Mode 2: mirror one or more native Jotform fields.
+    // "4" watches a single address field; "4,5,7" watches e.g. Street, City,
+    // Country and joins them into one query as any of them changes.
+    var ids = idList(CFG.addressFieldId);
+    if (inJotform && ids.length) attachFields(ids);
+  }
+
+  // Flatten whatever shape a field reports into a plain string
+  function fieldText(value) {
+    var v = (value && value.value !== undefined) ? value.value : value;
+    if (v && typeof v === "object") {
+      v = Object.keys(v).map(function (k) { return v[k]; })
+                        .filter(function (x) { return x && typeof x !== "object"; })
+                        .join(", ");
+    }
+    return str(v);
+  }
+
+  function attachFields(ids) {
+    var parts = {};                        // field id -> its current text
+    ids.forEach(function (id) { parts[id] = ""; });
+
+    function combined() {
+      return ids.map(function (id) { return parts[id]; })
+                .filter(Boolean)
+                .join(", ");
+    }
+
+    function pushUpdate() {
+      var q = combined();
+      if ($search && CFG.showSearchBox) $search.value = q;
+      // External fields drive the map directly — there is no dropdown to pick from.
+      runQuery(q, "apply");
+    }
+
+    ids.forEach(function (id) {
       try {
-        JFCustomWidget.listenFromField(fid, "change", function (value) {
-          var v = (value && value.value !== undefined) ? value.value : value;
-          if (v && typeof v === "object") v = Object.keys(v).map(function (k) { return v[k]; })
-                                                            .filter(Boolean).join(", ");
-          if ($search && CFG.showSearchBox) $search.value = str(v);
-          runQuery(v, false);
+        JFCustomWidget.listenFromField("input_" + id, "change", function (value) {
+          parts[id] = fieldText(value);
+          pushUpdate();
         });
       } catch (e) {
-        setStatus("Couldn't attach to field " + fid + ".", true);
+        setStatus("Couldn't attach to field input_" + id + ".", true);
       }
-      // Also pull whatever is already in the field on load
-      try {
-        JFCustomWidget.getFieldsValueById([CFG.addressFieldId.replace(/^input_/, "")], function (data) {
-          var v = data && (Array.isArray(data) ? data[0] : data[Object.keys(data)[0]]);
-          if (v && typeof v === "object") v = v.value !== undefined ? v.value : Object.keys(v)
-                                              .map(function (k) { return v[k]; }).filter(Boolean).join(", ");
-          if (v) { if ($search && CFG.showSearchBox) $search.value = str(v); runQuery(v, true); }
+    });
+
+    // Seed from whatever is already in those fields (prefill / edit mode)
+    try {
+      JFCustomWidget.getFieldsValueById(ids, function (data) {
+        if (!data) return;
+        ids.forEach(function (id, i) {
+          var v = Array.isArray(data) ? data[i] : (data[id] !== undefined ? data[id] : data["input_" + id]);
+          if (v !== undefined) parts[id] = fieldText(v);
         });
-      } catch (e) {}
-    }
+        if (combined()) pushUpdate();
+      });
+    } catch (e) {}
   }
 
   if (inJotform) {
     JFCustomWidget.subscribe("ready", function (data) {
       // Restore a previously saved value (edit mode / prefill)
       try {
-        var prev = data && data.value;
-        if (prev) {
-          var r = JSON.parse(prev);
-          if (r && isFinite(r.lat)) {
-            setTimeout(function () {
-              applyResult({
-                lat: r.lat, lng: r.lng, formatted: r.address || "",
-                neighborhood: r.neighborhood || "", neighborhoodSource: r.neighborhoodSource || "",
-                street: r.street || "", city: r.city || "", county: r.county || "",
-                state: r.state || "", postal: r.postal || "", country: r.country || "",
-                countryCode: r.countryCode || "", provider: r.provider || "osm"
-              }, true);
-              if ($search) { $search.value = r.address || ""; lastQuery = r.address || ""; }
-              resize();
-            }, 400);
-          }
+        var r = parseStored(data && data.value);
+        if (r) {
+          setTimeout(function () {
+            applyResult(r, true);
+            if ($search) { $search.value = r.formatted || ""; lastQuery = r.formatted || ""; }
+            resize();
+          }, 400);
         }
       } catch (e) {}
       start();
     });
 
     JFCustomWidget.subscribe("submit", function () {
-      var value = payload();
       JFCustomWidget.sendSubmit({
-        valid: CFG.requireValue ? !!value : true,
-        value: value
+        // Validity keys off "did an address resolve", not off the payload string —
+        // in neighborhood-only mode a legitimate result can serialize to "".
+        valid: CFG.requireValue ? !!result : true,
+        value: payload()
       });
     });
+    // Safety net: if the parent form never completes the handshake, boot anyway
+    // rather than sitting on a blank map forever.
+    setTimeout(start, 2500);
   } else {
-    // Standalone / local testing
-    window.addEventListener("DOMContentLoaded", start);
+    // Standalone: viewing the hosted file directly, outside any form.
+    if (document.readyState === "loading") {
+      window.addEventListener("DOMContentLoaded", start);
+    } else {
+      start();
+    }
   }
 
   // Expose for automated testing
   window.__widget = {
     geocode: geocode,
+    suggest: suggest,
+    parseStored: parseStored,
+    idList: idList,
+    isStarted: function () { return started; },
+    inJotform: inJotform,
     reverseGeocode: reverseGeocode,
     hoodFromOsm: hoodFromOsm,
     hoodFromGoogle: hoodFromGoogle,
