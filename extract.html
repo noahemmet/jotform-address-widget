@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Address Field Extractor</title>
+<script src="https://cdn.jotfor.ms/s/umd/latest/for-custom-widgets.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: transparent;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; color: #2c3345;
+  }
+  #wrap { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; min-height: 20px; }
+  #lbl { color: #6b7386; font-size: 12.5px; flex: 0 0 auto; }
+  #val { font-weight: 600; word-break: break-word; }
+  #val.empty { font-weight: 400; color: #9aa1b2; font-style: italic; }
+  #wrap.quiet { visibility: hidden; height: 1px; min-height: 0; padding: 0; }
+  #err {
+    color: #a12b2b; background: #fff5f5; border: 1px solid #f0b4b4; border-radius: 4px;
+    padding: 8px 10px; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap;
+  }
+  #err[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap"><span id="lbl"></span><span id="val" class="empty">—</span></div>
+<div id="err" hidden></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* Reads a JSON (or labeled-lines) blob out of another form field and submits
+     exactly one key from it. No map, no geocoding, no network calls — this
+     exists so each address component can occupy its own Jotform column. */
+
+  var CFG = {
+    sourceFieldId : "",      // numeric id of the field holding the blob, e.g. "4"
+    extractKey    : "",      // e.g. "city"
+    label         : "",      // optional caption shown beside the value
+    showValue     : true,    // No -> render nothing (still submits)
+    decimals      : ""       // optional rounding for numeric keys like lat/lng
+  };
+
+  var SETTINGS = {
+    "Source Field ID" : ["sourceFieldId", str],
+    "Extract Key"     : ["extractKey",    str],
+    "Label"           : ["label",         str],
+    "Show Value"      : ["showValue",     bool],
+    "Decimals"        : ["decimals",      str]
+  };
+
+  function str(v)  { return v == null ? "" : String(v).trim(); }
+  function bool(v) { return /^(yes|true|1|on)$/i.test(str(v)); }
+
+  var inJotform = (typeof JFCustomWidget !== "undefined") && (window.self !== window.top);
+  var started = false;
+  var current = "";
+
+  var $wrap = document.getElementById("wrap");
+  var $lbl  = document.getElementById("lbl");
+  var $val  = document.getElementById("val");
+  var $err  = document.getElementById("err");
+
+  function fail(msg) {
+    $err.hidden = false;
+    $err.textContent = "Extractor error:\n" + msg;
+    resize();
+  }
+
+  // Values can arrive HTML-escaped depending on how they travel through the
+  // form; normalise before parsing so &quot; doesn't break JSON.parse.
+  function unescapeHtml(s) {
+    if (s.indexOf("&") === -1) return s;
+    return s.replace(/&quot;/g, '"').replace(/&#0?34;/g, '"')
+            .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+            .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+            .replace(/&amp;/g, "&");
+  }
+
+  // Accepts the widget's json OR labeled-lines output, or a bare value.
+  function parseBlob(raw) {
+    raw = unescapeHtml(str(raw));
+    if (!raw) return null;
+
+    if (raw.charAt(0) === "{") {
+      try { return JSON.parse(raw); } catch (e) { return null; }
+    }
+
+    if (raw.indexOf(": ") !== -1) {
+      var out = {};
+      raw.split("\n").forEach(function (line) {
+        var i = line.indexOf(": ");
+        if (i < 1) return;
+        // "Country Code" -> countryCode, "Full Address" -> fullAddress
+        var k = line.slice(0, i).trim().toLowerCase().replace(/\s+(.)/g,
+                  function (m, c) { return c.toUpperCase(); });
+        out[k] = line.slice(i + 2).trim();
+      });
+      return out;
+    }
+    return null;
+  }
+
+  function extract(obj) {
+    if (!obj) return "";
+    var key = CFG.extractKey;
+    if (!key) return "";
+
+    var v = obj[key];
+    // tolerate a few common aliases so a typo'd key still works
+    if (v === undefined) {
+      var alt = { lon: "lng", long: "lng", latitude: "lat", longitude: "lng",
+                  zip: "postal", postcode: "postal", region: "state",
+                  fullAddress: "address" }[key];
+      if (alt) v = obj[alt];
+    }
+    if (v === undefined || v === null) return "";
+
+    if (CFG.decimals !== "" && isFinite(parseFloat(v))) {
+      var d = parseInt(CFG.decimals, 10);
+      if (isFinite(d)) return parseFloat(v).toFixed(d);
+    }
+    return String(v);
+  }
+
+  function render(v) {
+    current = v;
+    if (v) { $val.textContent = v; $val.className = ""; }
+    else   { $val.textContent = "—"; $val.className = "empty"; }
+    send();
+    resize();
+  }
+
+  function send() {
+    if (!inJotform) return;
+    try { JFCustomWidget.sendData({ value: current }); } catch (e) {}
+  }
+
+  function resize() {
+    if (!inJotform) return;
+    var h = document.body.scrollHeight + 4;
+    try { JFCustomWidget.requestFrameResize({ height: Math.max(h, 24) }); } catch (e) {}
+  }
+
+  function fieldText(value) {
+    var v = (value && value.value !== undefined) ? value.value : value;
+    if (v && typeof v === "object") {
+      v = Object.keys(v).map(function (k) { return v[k]; })
+                        .filter(function (x) { return x && typeof x !== "object"; })
+                        .join(" ");
+    }
+    return str(v);
+  }
+
+  function update(rawFieldValue) {
+    render(extract(parseBlob(fieldText(rawFieldValue))));
+  }
+
+  function loadSettings() {
+    if (!inJotform) return;
+    Object.keys(SETTINGS).forEach(function (name) {
+      var raw;
+      try { raw = JFCustomWidget.getWidgetSetting(name); } catch (e) { return; }
+      if (raw === undefined || raw === null || String(raw).trim() === "") return;
+      CFG[SETTINGS[name][0]] = SETTINGS[name][1](raw);
+    });
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    loadSettings();
+
+    $lbl.textContent = CFG.label || "";
+    if (!CFG.showValue) $wrap.className = "quiet";
+
+    if (!inJotform) { render(""); return; }
+
+    var id = CFG.sourceFieldId.replace(/^input_/, "");
+    if (!id)             return fail('No "Source Field ID" set.');
+    if (!CFG.extractKey) return fail('No "Extract Key" set.');
+
+    try {
+      JFCustomWidget.listenFromField("input_" + id, "change", update);
+    } catch (e) {
+      return fail("Couldn't listen to field input_" + id + ".");
+    }
+
+    // Pick up a value that's already there (prefill, or a condition that
+    // populated the source field before this widget finished loading).
+    try {
+      JFCustomWidget.getFieldsValueById([id], function (data) {
+        if (!data) return;
+        var v = Array.isArray(data) ? data[0]
+              : (data[id] !== undefined ? data[id] : data["input_" + id]);
+        if (v !== undefined) update(v);
+      });
+    } catch (e) {}
+
+    // The source field is often filled by a condition rather than by typing,
+    // and conditions don't always emit a change event the widget API forwards.
+    // Poll briefly as a backstop; cheap, and stops once things settle.
+    var polls = 0;
+    var timer = setInterval(function () {
+      if (++polls > 40) return clearInterval(timer);   // ~60s
+      try {
+        JFCustomWidget.getFieldsValueById([id], function (data) {
+          if (!data) return;
+          var v = Array.isArray(data) ? data[0]
+                : (data[id] !== undefined ? data[id] : data["input_" + id]);
+          if (v === undefined) return;
+          var next = extract(parseBlob(fieldText(v)));
+          if (next !== current) render(next);
+        });
+      } catch (e) {}
+    }, 1500);
+  }
+
+  if (inJotform) {
+    JFCustomWidget.subscribe("ready", function (data) {
+      try { if (data && data.value) { current = str(data.value); $val.textContent = current || "—"; } } catch (e) {}
+      start();
+    });
+    JFCustomWidget.subscribe("submit", function () {
+      JFCustomWidget.sendSubmit({ valid: true, value: current });
+    });
+    setTimeout(start, 2500);   // boot even if the handshake never completes
+  } else {
+    if (document.readyState === "loading") {
+      window.addEventListener("DOMContentLoaded", start);
+    } else { start(); }
+  }
+
+  window.__extract = {
+    parseBlob: parseBlob, extract: extract, unescapeHtml: unescapeHtml,
+    cfg: CFG, get: function () { return current; }, update: update
+  };
+})();
+</script>
+</body>
+</html>
