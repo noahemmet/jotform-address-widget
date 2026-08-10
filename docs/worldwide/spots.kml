@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>spots</name>
+  <Style id="cat-art-installation">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-vending-machines">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-free-art-exchanges">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-plant-and-seed-swaps">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-yard-installations">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-trinkets">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/orange-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-free-library">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/ltblu-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-mini-galleries">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/pink-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-wishing-trees">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-one-of-a-kinds">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/grn-stars.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-default">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Placemark>
+    <name>Sellwood Seed Swap Cabinet</name>
+    <description><![CDATA[A repurposed medicine cabinet on the library's side lawn, full of labeled envelopes of vegetable and flower seeds. Leave what you have extra of, take what you'll plant.]]></description>
+    <styleUrl>#cat-plant-and-seed-swaps</styleUrl>
+    <ExtendedData>
+      <Data name="neighborhood"><value>Sellwood</value></Data>
+      <Data name="street"><value>7860 Southeast 13th Avenue</value></Data>
+      <Data name="city"><value>Portland</value></Data>
+      <Data name="state"><value>Oregon</value></Data>
+      <Data name="postal"><value>97202</value></Data>
+      <Data name="Category"><value>Plant and Seed Swaps</value></Data>
+    </ExtendedData>
+    <Point><coordinates>-122.6527888,45.4677335,0</coordinates></Point>
+  </Placemark>
+  <Placemark>
+    <name>Alberta Street Mosaic Pillar</name>
+    <description><![CDATA[Tiled mosaic column on the sidewalk outside the coffee shop, covered in broken plates and mirror shards. Different artist adds a panel each summer.]]></description>
+    <styleUrl>#cat-art-installation</styleUrl>
+    <ExtendedData>
+      <Data name="neighborhood"><value>Alberta</value></Data>
+      <Data name="street"><value>1728 Northeast Alberta Street</value></Data>
+      <Data name="city"><value>Portland</value></Data>
+      <Data name="state"><value>Oregon</value></Data>
+      <Data name="postal"><value>97211</value></Data>
+      <Data name="Category"><value>Art Installation</value></Data>
+    </ExtendedData>
+    <Point><coordinates>-122.6474084,45.5590001,0</coordinates></Point>
+  </Placemark>
+</Document>
+</kml>

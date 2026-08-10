@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+  <name>Free Library</name>
+  <Style id="cat-art-installation">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-vending-machines">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/blu-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-free-art-exchanges">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/purple-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-plant-and-seed-swaps">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/grn-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-yard-installations">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/ylw-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-trinkets">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/orange-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-free-library">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/ltblu-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-mini-galleries">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/pink-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-wishing-trees">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/wht-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-one-of-a-kinds">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/grn-stars.png</href></Icon>
+    </IconStyle>
+  </Style>
+  <Style id="cat-default">
+    <IconStyle>
+      <Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon>
+    </IconStyle>
+  </Style>
+</Document>
+</kml>
