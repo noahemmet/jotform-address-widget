@@ -1,0 +1,117 @@
+name: Export spots
+
+# Two ways in, no schedule:
+#   workflow_dispatch  — the "Run workflow" button in the Actions tab
+#   repository_dispatch — the Cloudflare Worker, after a spot is verified
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the files but don't commit them"
+        type: boolean
+        default: false
+      allow_unverified:
+        description: "DANGER: include unreviewed submissions"
+        type: boolean
+        default: false
+  repository_dispatch:
+    types: [jotform-verified]
+
+# One run at a time. Two verifications landing together would otherwise race
+# on the same commit and one would fail to push.
+concurrency:
+  group: export-spots
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show what triggered this
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "Submission: ${{ github.event.client_payload.submission_id }}"
+          fi
+
+      - name: Build CSV + KML
+        env:
+          JOTFORM_API_KEY: ${{ secrets.JOTFORM_API_KEY }}
+          JOTFORM_FORM_ID: ${{ secrets.JOTFORM_FORM_ID }}
+        run: |
+          set -euo pipefail
+          ARGS=""
+          if [ "${{ inputs.allow_unverified }}" = "true" ]; then
+            ARGS="--allow-unverified"
+          fi
+
+          # Allowlist: ONLY these columns are ever published. A form field
+          # added to the form later stays invisible until it's named here —
+          # the failure mode of forgetting is silence, not a leak.
+          FIELDS="Title,Description,Category,neighborhood,street,city,state,postal,lat,lng"
+
+          # Everything verified, wherever it is.
+          python3 export.py --out-dir docs/worldwide --split-by \
+            --fields "$FIELDS" $ARGS
+
+          # Portland only. country_code, not country: the stored value is
+          # "United States", so country=usa would match nothing.
+          python3 export.py --out-dir docs/pdx --split-by \
+            --fields "$FIELDS" \
+            --filter "country_code=US,state=Oregon,city=Portland" $ARGS
+
+      - name: Sanity-check the output
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          ns = {"k": "http://www.opengis.net/kml/2.2"}
+          counts = {}
+          for name in ("worldwide", "pdx"):
+              root = ET.parse(f"docs/{name}/spots.kml").getroot()
+              counts[name] = len(root.findall(".//k:Placemark", ns))
+              print(f"{name}: {counts[name]} placemark(s)")
+          # A parse failure or an empty worldwide set means something upstream
+          # broke; better to fail than publish a broken map over a good one.
+          # An empty pdx is only worth a warning — it's a legitimate subset.
+          if counts["worldwide"] == 0:
+              sys.exit("Refusing to publish an empty worldwide KML.")
+          if counts["pdx"] == 0:
+              print("WARNING: pdx is empty — no verified spots matched the filter.")
+          PY
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spots
+          path: |
+            docs/worldwide/
+            docs/pdx/
+
+      - name: Commit
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/worldwide docs/pdx
+          if git diff --cached --quiet; then
+            echo "No change."
+            exit 0
+          fi
+          git commit -m "Update spots export ($(date -u +%Y-%m-%dT%H:%MZ))"
+          # A concurrent run may have pushed first; rebase rather than fail.
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            sleep $((i * 5))
+          done
+          exit 1
