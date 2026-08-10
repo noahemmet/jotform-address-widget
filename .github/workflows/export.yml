@@ -3,13 +3,12 @@ name: Export spots
 # Two ways in, no schedule:
 #   workflow_dispatch  — the "Run workflow" button in the Actions tab
 #   repository_dispatch — the Cloudflare Worker, after a spot is verified
+#
+# Nothing is committed. Output is uploaded as a run artifact and the download
+# link is printed to the run summary.
 on:
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Build the files but don't commit them"
-        type: boolean
-        default: false
       allow_unverified:
         description: "DANGER: include unreviewed submissions"
         type: boolean
@@ -17,14 +16,16 @@ on:
   repository_dispatch:
     types: [jotform-verified]
 
-# One run at a time. Two verifications landing together would otherwise race
-# on the same commit and one would fail to push.
+# One run at a time. Not strictly needed now that nothing is pushed, but it
+# keeps two near-simultaneous verifications from producing two near-identical
+# artifacts you then have to tell apart.
 concurrency:
   group: export-spots
   cancel-in-progress: false
 
+# Read-only: this workflow never writes to the repo.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   export:
@@ -54,64 +55,67 @@ jobs:
             ARGS="--allow-unverified"
           fi
 
-          # Allowlist: ONLY these columns are ever published. A form field
-          # added to the form later stays invisible until it's named here —
-          # the failure mode of forgetting is silence, not a leak.
+          # Build outside the working tree entirely, so a stray `git add -A` in
+          # some future step can't pick the output up.
+          OUT="${RUNNER_TEMP}/spots"
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+
+          # Allowlist: ONLY these columns are ever written. A form field added
+          # to the form later stays invisible until it's named here — the
+          # failure mode of forgetting is silence, not a leak.
           FIELDS="Title,Description,Category,neighborhood,street,city,state,postal,lat,lng"
 
           # Everything verified, wherever it is.
-          python3 export.py --out-dir docs/worldwide --split-by \
+          python3 export.py --out-dir "$OUT/worldwide" --split-by \
             --fields "$FIELDS" $ARGS
 
           # Portland only. country_code, not country: the stored value is
           # "United States", so country=usa would match nothing.
-          python3 export.py --out-dir docs/pdx --split-by \
+          python3 export.py --out-dir "$OUT/pdx" --split-by \
             --fields "$FIELDS" \
             --filter "country_code=US,state=Oregon,city=Portland" $ARGS
 
       - name: Sanity-check the output
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import sys, xml.etree.ElementTree as ET
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import os, sys, csv, xml.etree.ElementTree as ET
+          out = os.environ["OUT"]
           ns = {"k": "http://www.opengis.net/kml/2.2"}
           counts = {}
+          print("| Set | Rows | Placemarks |")
+          print("|---|---:|---:|")
           for name in ("worldwide", "pdx"):
-              root = ET.parse(f"docs/{name}/spots.kml").getroot()
+              root = ET.parse(f"{out}/{name}/spots.kml").getroot()
               counts[name] = len(root.findall(".//k:Placemark", ns))
-              print(f"{name}: {counts[name]} placemark(s)")
+              with open(f"{out}/{name}/spots.csv", newline="") as f:
+                  rows = max(0, sum(1 for _ in csv.reader(f)) - 1)
+              print(f"| {name} | {rows} | {counts[name]} |")
           # A parse failure or an empty worldwide set means something upstream
-          # broke; better to fail than publish a broken map over a good one.
+          # broke; better to fail the run than hand over a broken artifact.
           # An empty pdx is only worth a warning — it's a legitimate subset.
           if counts["worldwide"] == 0:
               sys.exit("Refusing to publish an empty worldwide KML.")
           if counts["pdx"] == 0:
-              print("WARNING: pdx is empty — no verified spots matched the filter.")
+              print("\n> **Warning:** pdx is empty — no verified spots matched the filter.")
           PY
 
       - name: Upload as artifact
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: spots
-          path: |
-            docs/worldwide/
-            docs/pdx/
+          path: ${{ env.OUT }}
+          # Temporary by design. Raise it if you want a longer window; the
+          # repo-wide default is 90 days.
+          retention-days: 7
+          if-no-files-found: error
 
-      - name: Commit
-        if: ${{ inputs.dry_run != true }}
+      - name: Link to the download
         run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/worldwide docs/pdx
-          if git diff --cached --quiet; then
-            echo "No change."
-            exit 0
-          fi
-          git commit -m "Update spots export ($(date -u +%Y-%m-%dT%H:%MZ))"
-          # A concurrent run may have pushed first; rebase rather than fail.
-          for i in 1 2 3; do
-            git pull --rebase --autostash && git push && exit 0
-            sleep $((i * 5))
-          done
-          exit 1
+          {
+            echo ""
+            echo "### [Download spots.zip](${{ steps.upload.outputs.artifact-url }})"
+            echo ""
+            echo "Expires in 7 days. Signing in to GitHub is required to download."
+          } >> "$GITHUB_STEP_SUMMARY"
